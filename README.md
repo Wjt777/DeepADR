@@ -17,3 +17,7 @@ This repository provides the model architecture, feature construction pipeline, 
 | pykan | 0.2.8 |
 
 ## Run the Model
+
+```bash
+python run_model.py --data_dir "./data" --epochs 30
+
