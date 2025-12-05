@@ -162,9 +162,7 @@ class MAELoss(nn.Module):
 
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, device, num_epochs=10):
-    """
-    訓練過程不打印細節，只負責更新權重。
-    """
+
     mae_criterion = MAELoss()
 
     for _ in range(num_epochs):
