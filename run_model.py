@@ -10,14 +10,6 @@ from torch.utils.data import DataLoader, random_split
 from network import DrugADRDataset, DeepADR_KAN, RMSELoss, train_model, evaluate_model
 
 
-def set_seed(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run DeepADR-KAN model")
