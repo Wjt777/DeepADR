@@ -7,25 +7,6 @@ from scipy.stats import pearsonr
 from kan import KAN
 
 
-class AttentionMechanism(nn.Module):
-    def __init__(self, drug_dim, adr_dim, hidden_dim=128):
-        super().__init__()
-        self.drug_projection = nn.Linear(drug_dim, hidden_dim)
-        self.adr_projection = nn.Linear(adr_dim, hidden_dim)
-        self.attention = nn.Linear(hidden_dim, 1)
-
-    def forward(self, drug_features, adr_features):
-        # project into same latent space
-        drug_proj = self.drug_projection(drug_features)
-        adr_proj = self.adr_projection(adr_features)
-
-        energy = torch.tanh(drug_proj + adr_proj)
-        attention_scores = F.softmax(self.attention(energy), dim=1)
-
-        attended_drug = drug_features * attention_scores
-        return torch.cat([attended_drug, adr_features], dim=1)
-
-
 class DrugADRDataset(Dataset):
     def __init__(self, drug_molformer_df, drug_target_df, adr_biobert_df, adr_drug_mtx_df):
         """
@@ -58,6 +39,25 @@ class DrugADRDataset(Dataset):
             self.y[idx],
         )
 
+
+class AttentionMechanism(nn.Module):
+    def __init__(self, drug_dim, adr_dim, hidden_dim=128):
+        super().__init__()
+        self.drug_projection = nn.Linear(drug_dim, hidden_dim)
+        self.adr_projection = nn.Linear(adr_dim, hidden_dim)
+        self.attention = nn.Linear(hidden_dim, 1)
+
+    def forward(self, drug_features, adr_features):
+        # project into same latent space
+        drug_proj = self.drug_projection(drug_features)
+        adr_proj = self.adr_projection(adr_features)
+
+        energy = torch.tanh(drug_proj + adr_proj)
+        attention_scores = F.softmax(self.attention(energy), dim=1)
+
+        attended_drug = drug_features * attention_scores
+        return torch.cat([attended_drug, adr_features], dim=1)
+        
 
 class CNNBranch(nn.Module):
     def __init__(self, input_dim, output_dim):
