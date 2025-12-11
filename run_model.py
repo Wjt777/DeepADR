@@ -7,12 +7,12 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from network import DrugADRDataset, DeepADR_KAN, RMSELoss, train_model, evaluate_model
+from network import DrugADRDataset, DeepADR, RMSELoss, train_model, evaluate_model
 
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run DeepADR-KAN model")
+    parser = argparse.ArgumentParser(description="Run DeepADR model")
 
     parser.add_argument("--data_dir", type=str, required=True, help="Directory of data files")
     parser.add_argument("--epochs", type=int, default=25)
@@ -25,10 +25,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    set_seed(42)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
 
     # ---------- load data ----------
     drug_mol = np.load(os.path.join(args.data_dir, "drug_molformer.npy"))
@@ -44,8 +40,8 @@ def main():
 
     # ---------- split ----------
     n_total = len(dataset)
-    n_train = int(0.7 * n_total)
-    n_val = int(0.2 * n_total)
+    n_train = int(0.64 * n_total)
+    n_val = int(0.16 * n_total)
     n_test = n_total - n_train - n_val
 
     train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test])
@@ -77,11 +73,6 @@ def main():
     # ---------- evaluate (only final performance printed) ----------
     print("\n========== Final Test Performance ==========")
     evaluate_model(model, test_loader, criterion, device)
-
-    # ---------- save model ----------
-    save_path = os.path.join(args.data_dir, "deepadr_kan_model.pth")
-    torch.save(model.state_dict(), save_path)
-    print(f"Model saved to: {save_path}")
 
 
 if __name__ == "__main__":
