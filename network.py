@@ -108,7 +108,7 @@ class VAEBranch(nn.Module):
         return z
 
 
-class DeepADR_KAN(nn.Module):
+class DeepADR(nn.Module):
     def __init__(
         self,
         input_dim1,
