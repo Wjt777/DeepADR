@@ -3,30 +3,39 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-from scipy.stats import pearsonr
 from kan import KAN
 
 
+# =========================
+# Dataset
+# =========================
 class DrugADRDataset(Dataset):
-    def __init__(self, drug_molformer_df, drug_target_df, adr_biobert_df, adr_drug_mtx_df):
+    def __init__(
+        self,
+        drug_molformer_df,
+        drug_target_df,
+        adr_biobert_df,
+        adr_drug_mtx_df,
+    ):
         """
-        drug_molformer_df: DataFrame, shape [n_drugs, mol_dim]
-        drug_target_df:    DataFrame, shape [n_drugs, target_dim]
-        adr_biobert_df:    DataFrame, shape [n_adrs, adr_dim]
-        adr_drug_mtx_df:   DataFrame, shape [n_drugs, n_adrs]
+        drug_molformer_df: [n_drugs, mol_dim]
+        drug_target_df:    [n_drugs, target_dim]
+        adr_biobert_df:    [n_adrs, adr_dim]
+        adr_drug_mtx_df:   [n_drugs, n_adrs]
         """
-        self.drug_molformer_mtx = drug_molformer_df.values
-        self.drug_target_mtx = drug_target_df.values
-        self.side_features = adr_biobert_df.values  
 
-        non_zero_indices = np.nonzero(adr_drug_mtx_df.values)
-        self.drug_indices, self.adr_indices = non_zero_indices
-        self.y = adr_drug_mtx_df.values[self.drug_indices, self.adr_indices]
+        drug_mol = drug_molformer_df.values
+        drug_tar = drug_target_df.values
+        adr_feat = adr_biobert_df.T.values
+        mtx = adr_drug_mtx_df.values
 
-        self.drug_mol = torch.tensor(self.drug_molformer_mtx[self.drug_indices], dtype=torch.float32)
-        self.drug_tar = torch.tensor(self.drug_target_mtx[self.drug_indices], dtype=torch.float32)
-        self.adr_bio = torch.tensor(self.side_features[self.adr_indices], dtype=torch.float32)
-        self.y = torch.tensor(self.y, dtype=torch.float32).view(-1)
+        drug_idx, adr_idx = np.nonzero(mtx)
+        y = mtx[drug_idx, adr_idx]
+
+        self.drug_mol = torch.tensor(drug_mol[drug_idx], dtype=torch.float32)
+        self.drug_tar = torch.tensor(drug_tar[drug_idx], dtype=torch.float32)
+        self.adr_feat = torch.tensor(adr_feat[adr_idx], dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.float32)
 
     def __len__(self):
         return len(self.y)
@@ -35,54 +44,54 @@ class DrugADRDataset(Dataset):
         return (
             self.drug_mol[idx],
             self.drug_tar[idx],
-            self.adr_bio[idx],
+            self.adr_feat[idx],
             self.y[idx],
         )
 
 
+# =========================
+# Attention
+# =========================
 class AttentionMechanism(nn.Module):
     def __init__(self, drug_dim, adr_dim, hidden_dim=128):
         super().__init__()
-        self.drug_projection = nn.Linear(drug_dim, hidden_dim)
-        self.adr_projection = nn.Linear(adr_dim, hidden_dim)
-        self.attention = nn.Linear(hidden_dim, 1)
+        self.drug_proj = nn.Linear(drug_dim, hidden_dim)
+        self.adr_proj = nn.Linear(adr_dim, hidden_dim)
+        self.attn = nn.Linear(hidden_dim, 1)
 
-    def forward(self, drug_features, adr_features):
-        # project into same latent space
-        drug_proj = self.drug_projection(drug_features)
-        adr_proj = self.adr_projection(adr_features)
+    def forward(self, drug_feat, adr_feat):
+        h = torch.tanh(self.drug_proj(drug_feat) + self.adr_proj(adr_feat))
+        alpha = torch.sigmoid(self.attn(h))
+        attended_drug = drug_feat * alpha
+        return torch.cat([attended_drug, adr_feat], dim=1)
 
-        energy = torch.tanh(drug_proj + adr_proj)
-        attention_scores = F.softmax(self.attention(energy), dim=1)
 
-        attended_drug = drug_features * attention_scores
-        return torch.cat([attended_drug, adr_features], dim=1)
-        
-
+# =========================
+# CNN Branch
+# =========================
 class CNNBranch(nn.Module):
     def __init__(self, input_dim, output_dim):
         super().__init__()
-        self.conv1 = nn.Conv1d(1, 8, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv1d(8, 16, kernel_size=3, stride=1, padding=1)
-        self.pool = nn.MaxPool1d(kernel_size=2, stride=2)
+        self.conv1 = nn.Conv1d(1, 8, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(8, 16, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool1d(2)
 
-        # after two pools: length = input_dim / 4, channels = 16
-        self.fc_input_dim = (input_dim // 4) * 16
-        self.fc1 = nn.Linear(self.fc_input_dim, 1024)
+        fc_dim = (input_dim // 4) * 16
+        self.fc1 = nn.Linear(fc_dim, 1024)
         self.fc2 = nn.Linear(1024, output_dim)
-        self.relu = nn.ReLU()
 
     def forward(self, x):
-        batch_size = x.size(0)
-        x = x.view(batch_size, 1, -1)
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = x.view(batch_size, -1)
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+        x = x.unsqueeze(1)
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = x.flatten(1)
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
 
 
+# =========================
+# VAE Branch
+# =========================
 class VAEBranch(nn.Module):
     def __init__(self, input_dim, latent_dim):
         super().__init__()
@@ -104,46 +113,54 @@ class VAEBranch(nn.Module):
         h = self.encoder(x)
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
-        z = self.reparameterize(mu, logvar)
-        return z
+        return self.reparameterize(mu, logvar)
 
 
+# =========================
+# DeepADR
+# =========================
 class DeepADR(nn.Module):
     def __init__(
         self,
-        input_dim1,
-        input_dim2,
-        cnn_output_dim,
+        mol_dim,
+        target_dim,
+        adr_dim,
+        cnn_out_dim,
         vae_latent_dim,
         kan_hidden_dim,
-        output_dim,
         kan_device="cpu",
     ):
         super().__init__()
 
-        self.attention = AttentionMechanism(drug_dim=input_dim1, adr_dim=input_dim1)
-        attention_output_dim = input_dim1 * 2
+        self.attention = AttentionMechanism(
+            drug_dim=mol_dim,
+            adr_dim=adr_dim,
+        )
 
-        self.cnn_branch = CNNBranch(input_dim=attention_output_dim, output_dim=cnn_output_dim)
-        self.vae_branch = VAEBranch(input_dim=input_dim2, latent_dim=vae_latent_dim)
+        attn_out_dim = mol_dim + adr_dim
 
-        self.kan_layer = KAN(
-            width=[cnn_output_dim + vae_latent_dim, kan_hidden_dim, output_dim],
+        self.cnn_branch = CNNBranch(attn_out_dim, cnn_out_dim)
+        self.vae_branch = VAEBranch(target_dim, vae_latent_dim)
+
+        self.kan = KAN(
+            width=[cnn_out_dim + vae_latent_dim, kan_hidden_dim, 1],
             grid=2,
             k=3,
             seed=42,
             device=kan_device,
         )
 
-    def forward(self, mol_features, tar_features, adr_features):
-        attention_output = self.attention(mol_features, adr_features)
-        cnn_out = self.cnn_branch(attention_output)
-        vae_out = self.vae_branch(tar_features)
-        combined_features = torch.cat([cnn_out, vae_out], dim=1)
-        kan_output = self.kan_layer(combined_features)
-        return kan_output
+    def forward(self, mol, tar, adr):
+        x_attn = self.attention(mol, adr)
+        x_cnn = self.cnn_branch(x_attn)
+        x_vae = self.vae_branch(tar)
+        x = torch.cat([x_cnn, x_vae], dim=1)
+        return self.kan(x).squeeze()
 
 
+# =========================
+# RMSE Loss
+# =========================
 class RMSELoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -153,61 +170,46 @@ class RMSELoss(nn.Module):
         return torch.sqrt(self.mse(y_pred, y_true))
 
 
-class MAELoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, y_pred, y_true):
-        return torch.mean(torch.abs(y_pred - y_true))
-
-
-def train_model(model, train_loader, val_loader, criterion, optimizer, device, num_epochs=10):
-
-    mae_criterion = MAELoss()
-
-    for _ in range(num_epochs):
-        model.train()
-        for mol, tar, adr, target in train_loader:
+# =========================
+# Train
+# =========================
+def train_model(model, loader, criterion, optimizer, device, epochs):
+    model.train()
+    for _ in range(epochs):
+        for mol, tar, adr, y in loader:
             mol = mol.to(device)
             tar = tar.to(device)
             adr = adr.to(device)
-            target = target.to(device)
+            y = y.to(device)
 
             optimizer.zero_grad()
-            output = model(mol, tar, adr)
-            loss = criterion(output.squeeze(), target)
+            pred = model(mol, tar, adr)
+            loss = criterion(pred, y)
             loss.backward()
             optimizer.step()
 
 
-def evaluate_model(model, test_loader, criterion, device):
-    mae_criterion = MAELoss()
-
+# =========================
+# Evaluate
+# =========================
+def evaluate_model(model, loader, criterion, device):
     model.eval()
-    test_rmse = 0.0
-    test_mae = 0.0
-    preds = []
-    targets = []
+    total_rmse = 0.0
 
     with torch.no_grad():
-        for mol, tar, adr, target in test_loader:
+        for mol, tar, adr, y in loader:
             mol = mol.to(device)
             tar = tar.to(device)
             adr = adr.to(device)
-            target = target.to(device)
+            y = y.to(device)
 
-            output = model(mol, tar, adr)
+            pred = model(mol, tar, adr)
+            total_rmse += criterion(pred, y).item()
 
-            test_rmse += criterion(output.squeeze(), target).item()
-            test_mae += mae_criterion(output.squeeze(), target).item()
-            preds.extend(output.squeeze().cpu().numpy())
-            targets.extend(target.cpu().numpy())
-
-    avg_rmse = test_rmse / len(test_loader)
-    avg_mae = test_mae / len(test_loader)
-    pcc, _ = pearsonr(targets, preds)
+    avg_rmse = total_rmse / len(loader)
 
     print("Test Performance:")
     print(f"RMSE: {avg_rmse:.4f}")
-    print(f"MAE:  {avg_mae:.4f}")
-    print(f"PCC:  {pcc:.4f}")
+
+    return avg_rmse
+
